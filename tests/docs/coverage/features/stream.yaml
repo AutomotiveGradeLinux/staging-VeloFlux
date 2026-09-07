@@ -1,0 +1,83 @@
+domain: stream
+features:
+  - id: stream.memory_topic.lifecycle
+    title: Memory topic lifecycle
+    summary: Declare, restore, and bind instance-scoped memory topics according to the documented resource contract.
+    doc_refs:
+      - docs/runtime/instances/memory_topics.md
+    status: active
+
+  - id: stream.shared.stats
+    title: Shared stream stats
+    summary: Report shared-stream runtime statistics according to the documented API contract.
+    doc_refs:
+      - docs/api/streams/shared_stream_stats.md
+    status: active
+
+  - id: stream.window.tumbling
+    title: Tumbling window behavior
+    summary: Execute tumbling-window stream behavior within the documented SQL-visible contract.
+    doc_refs:
+      - docs/syntax/windows/tumbling_window.md
+    status: active
+
+  - id: stream.window.sliding
+    title: Sliding window behavior
+    summary: Execute sliding-window stream behavior within the documented SQL-visible contract.
+    doc_refs:
+      - docs/syntax/windows/sliding_window.md
+    status: active
+
+  - id: stream.window.count
+    title: Count window behavior
+    summary: Execute count-window stream behavior within the documented SQL-visible contract.
+    doc_refs:
+      - docs/syntax/windows/count_window.md
+    status: active
+
+  - id: stream.window.state
+    title: State window behavior
+    summary: Execute state-window stream behavior within the documented SQL-visible contract.
+    doc_refs:
+      - docs/syntax/windows/state_window.md
+    status: active
+
+  - id: stream.watermark.propagation
+    title: Watermark propagation
+    summary: Preserve documented watermark behavior across stream execution paths.
+    doc_refs:
+      - docs/syntax/windows/watermarks.md
+      - docs/runtime/time/pipeline_eventtime.md
+    status: active
+
+  - id: stream.datatype.timestamp
+    title: Timestamp data type
+    summary: Decode, compare, and encode timestamp-typed stream values according to the documented UTC RFC3339 contract.
+    doc_refs:
+      - docs/syntax/datatypes/timestamp.md
+      - docs/syntax/datatypes/json_decode.md
+    status: active
+
+  - id: stream.datatype.bytes
+    title: Bytes data type
+    summary: Decode and encode bytes-typed stream values according to the documented JSON base64 contract.
+    doc_refs:
+      - docs/syntax/datatypes/schema.md
+      - docs/syntax/datatypes/json_decode.md
+    status: active
+
+  - id: stream.function.date_time_scalars
+    title: Date and time scalar functions
+    summary: Evaluate UTC timestamp-based scalar date/time functions, aliases, formatting, extraction, and null behavior according to the SQL-visible contract.
+    doc_refs:
+      - docs/syntax/functions/date_time_functions.md
+      - docs/syntax/functions/function_semantics.md
+    status: active
+
+  - id: stream.function.custom_udf
+    title: Custom UDF functions
+    summary: Evaluate registered custom scalar functions through the SQL-visible function registry contract.
+    doc_refs:
+      - docs/integrations/wasm-udf.md
+      - docs/syntax/functions/function_semantics.md
+    status: active

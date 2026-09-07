@@ -1,0 +1,167 @@
+// Copyright 2026 EMQ Technologies Co., Ltd.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! Connector abstractions for interacting with external systems.
+//!
+//! - Source connectors ingest bytes and expose them as async streams.
+//! - Sink connectors consume encoded payloads and push them outward.
+
+use futures::stream::Stream;
+use std::future::Future;
+use std::pin::Pin;
+
+use crate::checkpoint::CheckpointState;
+use crate::model::Collection;
+
+pub mod memory_pubsub;
+pub mod mqtt_client;
+mod mqtt_protocol;
+pub mod nng_pubsub;
+pub mod redact;
+pub mod registry;
+pub mod sink;
+pub mod source;
+
+pub use redact::{mask_url_userinfo, url_has_userinfo};
+
+/// Convenience alias for boxed connector streams.
+pub type ConnectorStream =
+    Pin<Box<dyn Stream<Item = Result<ConnectorEvent, ConnectorError>> + Send>>;
+
+/// Future returned when a source connector is asked to establish a checkpoint boundary.
+pub type SourceCheckpointRequest =
+    Pin<Box<dyn Future<Output = Result<Option<CheckpointState>, ConnectorError>> + Send>>;
+
+/// Events emitted by an upstream connector.
+pub enum ConnectorEvent {
+    /// Binary payload received from the source.
+    Payload(Vec<u8>),
+    /// Decoded collection received from the source.
+    Collection(Box<dyn Collection>),
+    /// The connector has no more data to produce.
+    EndOfStream,
+    /// All payloads before this event belong to the requested checkpoint boundary.
+    CheckpointFence { checkpoint_id: u64 },
+}
+
+impl std::fmt::Debug for ConnectorEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectorEvent::Payload(payload) => f
+                .debug_tuple("Payload")
+                .field(&format_args!("len={}", payload.len()))
+                .finish(),
+            ConnectorEvent::Collection(_) => f.debug_tuple("Collection").finish(),
+            ConnectorEvent::EndOfStream => f.write_str("EndOfStream"),
+            ConnectorEvent::CheckpointFence { checkpoint_id } => f
+                .debug_struct("CheckpointFence")
+                .field("checkpoint_id", checkpoint_id)
+                .finish(),
+        }
+    }
+}
+
+/// Trait implemented by every data source connector.
+pub trait SourceConnector: Send + Sync + 'static {
+    /// Identifier for logging/metrics.
+    fn id(&self) -> &str;
+    /// Subscribe to the underlying source and obtain an async payload stream.
+    fn subscribe(&mut self) -> Result<ConnectorStream, ConnectorError>;
+
+    /// Request a checkpoint boundary without stopping the connector immediately.
+    ///
+    /// The returned future resolves when the connector has stopped producing new payloads and
+    /// emitted a [`ConnectorEvent::CheckpointFence`] after all payloads produced before the
+    /// boundary.
+    fn request_checkpoint(
+        &mut self,
+        _checkpoint_id: u64,
+    ) -> Result<SourceCheckpointRequest, ConnectorError> {
+        Err(ConnectorError::Other(format!(
+            "source connector `{}` does not support checkpoint fences",
+            self.id()
+        )))
+    }
+
+    /// Validate connector-owned checkpoint state without staging it for startup.
+    fn validate_checkpoint(&self, _state: &CheckpointState) -> Result<(), ConnectorError> {
+        Err(ConnectorError::Other(format!(
+            "source connector `{}` does not support checkpoint restore",
+            self.id()
+        )))
+    }
+
+    /// Restore connector-owned state before [`SourceConnector::subscribe`] starts the source.
+    fn restore_checkpoint(&mut self, _state: &CheckpointState) -> Result<(), ConnectorError> {
+        Err(ConnectorError::Other(format!(
+            "source connector `{}` does not support checkpoint restore",
+            self.id()
+        )))
+    }
+
+    /// Discard connector-owned checkpoint state staged before startup.
+    fn clear_checkpoint_restore(&mut self) {}
+
+    /// Signal that no further data should be produced (default no-op).
+    fn close(&mut self) -> Result<(), ConnectorError> {
+        Ok(())
+    }
+}
+
+/// Error type shared by connectors.
+#[derive(thiserror::Error, Debug, Clone)]
+pub enum ConnectorError {
+    /// Connector has already been subscribed.
+    #[error("connector already subscribed: {0}")]
+    AlreadySubscribed(String),
+    /// Connector client already exists in the shared manager.
+    #[error("connector client already exists: {0}")]
+    AlreadyExists(String),
+    /// Connector client not found in the shared manager.
+    #[error("connector client not found: {0}")]
+    NotFound(String),
+    /// Connector client cannot be dropped because it is still in use.
+    #[error("connector client in use: {0}")]
+    ResourceBusy(String),
+    /// Connection-level failure.
+    #[error("connection error: {0}")]
+    Connection(String),
+    /// Miscellaneous error.
+    #[error("{0}")]
+    Other(String),
+}
+
+pub use memory_pubsub::{
+    MemoryData, MemoryPubSubError, MemoryPubSubRegistry, MemoryPublisher, MemoryTopicKind,
+    SharedCollection, DEFAULT_MEMORY_PUBSUB_CAPACITY,
+};
+pub(crate) use mqtt_client::MqttClientManager;
+pub use mqtt_client::SharedMqttClientConfig;
+pub use mqtt_protocol::{validate_mqtt_user_properties, MqttProtocolVersion, MqttUserProperty};
+pub use nng_pubsub::{NngPubSubSinkConfig, NngPubSubSourceConfig};
+pub use registry::ConnectorRegistry;
+pub use sink::file::FileSinkConfig;
+pub use sink::http::HttpSinkConfig;
+pub use sink::kuksa::KuksaSinkConfig;
+pub use sink::kura::KuraSinkConfig;
+pub use sink::memory::{MemorySinkConfig, MemorySinkConnector};
+pub use sink::mock::{MockSinkConnector, MockSinkHandle};
+pub use sink::mqtt::MqttSinkConfig;
+pub use sink::video::{VideoSinkConfig, VideoSinkConnector};
+pub use sink::{SinkConnector, SinkConnectorError};
+/// History source connector implementation.
+pub use source::file::FileSourceConfig;
+pub(crate) use source::file::FileSourceConnector;
+pub use source::history::HistorySourceConfig;
+pub(crate) use source::history::HistorySourceConnector;
+pub use source::memory::{MemorySourceConfig, MemorySourceConnector};
+pub use source::mock::{MockSourceConnector, MockSourceError, MockSourceHandle};
+/// MQTT-specific helpers and connector implementation.
+pub use source::mqtt::MqttSourceConfig;
+pub(crate) use source::mqtt::MqttSourceConnector;
+#[cfg(feature = "nng_pubsub")]
+pub(crate) use source::nng_pubsub::NngPubSubSourceConnector;
+pub use source::video::{VideoSourceConfig, VideoSourceConnector};

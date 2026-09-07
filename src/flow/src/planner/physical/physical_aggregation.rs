@@ -1,0 +1,160 @@
+// Copyright 2026 EMQ Technologies Co., Ltd.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+use crate::aggregation::AggregateFunctionRegistry;
+use crate::expr::custom_func::CustomFuncRegistry;
+use crate::expr::sql_conversion::{
+    convert_expr_to_scalar_with_bindings_and_custom_registry, SchemaBinding,
+};
+use crate::expr::ScalarExpr;
+use crate::planner::physical::BasePhysicalPlan;
+use sqlparser::ast::Expr;
+use sqlparser::ast::{FunctionArg, FunctionArgExpr};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use super::PhysicalPlan;
+
+#[derive(Debug, Clone)]
+pub struct AggregateCall {
+    pub output_column: String,
+    pub func_name: String,
+    pub args: Vec<ScalarExpr>,
+    pub distinct: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct PhysicalAggregation {
+    pub base: BasePhysicalPlan,
+    pub aggregate_mappings: HashMap<String, Expr>,
+    pub aggregate_calls: Vec<AggregateCall>,
+    pub group_by_exprs: Vec<Expr>,
+    pub group_by_scalars: Vec<ScalarExpr>,
+}
+
+impl PhysicalAggregation {
+    /// Check if all aggregate calls support incremental updates using the provided registry.
+    pub fn all_calls_incremental(
+        aggregate_calls: &[AggregateCall],
+        registry: &AggregateFunctionRegistry,
+    ) -> bool {
+        aggregate_calls
+            .iter()
+            .all(|call| registry.supports_incremental(&call.func_name))
+    }
+
+    pub fn new(
+        aggregate_mappings: HashMap<String, Expr>,
+        group_by_exprs: Vec<Expr>,
+        children: Vec<Arc<PhysicalPlan>>,
+        index: i64,
+        bindings: &SchemaBinding,
+        aggregate_registry: &AggregateFunctionRegistry,
+        custom_func_registry: &CustomFuncRegistry,
+    ) -> Result<Self, String> {
+        let mut aggregate_calls = Vec::new();
+        for (output_column, expr) in &aggregate_mappings {
+            let call = build_aggregate_call(
+                output_column,
+                expr,
+                bindings,
+                aggregate_registry,
+                custom_func_registry,
+            )?;
+            aggregate_calls.push(call);
+        }
+
+        let mut group_by_scalars = Vec::new();
+        for expr in &group_by_exprs {
+            group_by_scalars.push(
+                convert_expr_to_scalar_with_bindings_and_custom_registry(
+                    expr,
+                    bindings,
+                    custom_func_registry,
+                )
+                .map_err(|err| err.to_string())?,
+            );
+        }
+
+        Ok(Self {
+            base: BasePhysicalPlan::new(children, index),
+            aggregate_mappings,
+            aggregate_calls,
+            group_by_exprs,
+            group_by_scalars,
+        })
+    }
+}
+
+fn build_aggregate_call(
+    output_column: &str,
+    expr: &Expr,
+    bindings: &SchemaBinding,
+    aggregate_registry: &AggregateFunctionRegistry,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<AggregateCall, String> {
+    match expr {
+        Expr::Function(func) => {
+            let func_name = func.name.to_string().to_lowercase();
+            if !aggregate_registry.is_registered(&func_name) {
+                return Err(format!("Unsupported aggregate function: {}", func_name));
+            }
+
+            let args = extract_aggregate_args(func.args.as_slice(), bindings, custom_func_registry)
+                .map_err(|err| {
+                    format!(
+                        "Failed to compile aggregate argument for {}: {}",
+                        output_column, err
+                    )
+                })?;
+
+            Ok(AggregateCall {
+                output_column: output_column.to_string(),
+                func_name,
+                args,
+                distinct: func.distinct,
+            })
+        }
+        other => Err(format!(
+            "Expected aggregate function expression, got: {:?}",
+            other
+        )),
+    }
+}
+
+fn extract_aggregate_args(
+    args: &[FunctionArg],
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<Vec<ScalarExpr>, String> {
+    let mut compiled_args = Vec::new();
+    for arg in args {
+        let expr = function_arg_to_expr(arg)?;
+        compiled_args.push(
+            convert_expr_to_scalar_with_bindings_and_custom_registry(
+                &expr,
+                bindings,
+                custom_func_registry,
+            )
+            .map_err(|err| err.to_string())?,
+        );
+    }
+    Ok(compiled_args)
+}
+
+fn function_arg_to_expr(arg: &FunctionArg) -> Result<Expr, String> {
+    match arg {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => Ok(expr.clone()),
+        FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
+            // Represent wildcard as an identifier that the scalar converter treats as wildcard.
+            Ok(Expr::Identifier(sqlparser::ast::Ident::new("*")))
+        }
+        FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(_)) => {
+            Err("Qualified wildcard aggregate arguments are not supported".to_string())
+        }
+        FunctionArg::Named { .. } => Err("Named function arguments are not supported".to_string()),
+    }
+}

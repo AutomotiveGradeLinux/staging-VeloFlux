@@ -1,0 +1,259 @@
+// Copyright 2026 EMQ Technologies Co., Ltd.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+//! ControlSourceProcessor - starting point for data flow
+//!
+//! This processor is the pipeline head. External callers send [`Ingress`] items into it,
+//! and it forwards them to downstream processors while preserving channel isolation.
+
+use crate::processor::base::{
+    default_channel_capacities, send_control_with_backpressure, send_with_backpressure, LinkOutput,
+    LinkReceiver, ProcessorChannelCapacities,
+};
+use crate::processor::{
+    BarrierControlSignal, ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats,
+    StreamData,
+};
+use crate::runtime::TaskSpawner;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressTarget {
+    Data,
+    Control,
+}
+
+#[derive(Clone)]
+pub struct Ingress {
+    pub target: IngressTarget,
+    pub data: StreamData,
+}
+
+impl Ingress {
+    pub fn data(data: StreamData) -> Self {
+        Self {
+            target: IngressTarget::Data,
+            data,
+        }
+    }
+
+    pub fn control(signal: ControlSignal) -> Self {
+        Self {
+            target: IngressTarget::Control,
+            data: StreamData::control(signal),
+        }
+    }
+}
+
+/// ControlSourceProcessor - handles control signals for the pipeline
+///
+/// This processor acts as the starting point of the data flow. It:
+/// - Receives `Ingress` items from a single input (single-input)
+/// - Forwards StreamData to multiple downstream processors (multi-output)
+/// - Coordinates the start/end of stream processing
+pub struct ControlSourceProcessor {
+    /// Processor identifier
+    id: String,
+    /// Single input channel for receiving ingress items.
+    ingress: Option<mpsc::Receiver<Ingress>>,
+    /// Broadcast channel for all downstream processors
+    output: LinkOutput<StreamData>,
+    /// Dedicated control channel for urgent control propagation
+    control_output: LinkOutput<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
+    /// Monotonically increasing control-signal id allocator (shared across control/data channels).
+    next_control_signal_id: Arc<AtomicU64>,
+    stats: Arc<ProcessorStats>,
+}
+
+impl ControlSourceProcessor {
+    /// Create a new ControlSourceProcessor
+    pub fn new(id: impl Into<String>) -> Self {
+        Self::new_with_channel_capacities(id, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
+        let control_output = LinkOutput::new(
+            channel_capacities.control_link_kind,
+            channel_capacities.control,
+        );
+        Self {
+            id: id.into(),
+            ingress: None,
+            output,
+            control_output,
+            channel_capacities,
+            next_control_signal_id: Arc::new(AtomicU64::new(1)),
+            stats: Arc::new(ProcessorStats::default()),
+        }
+    }
+
+    pub fn set_ingress_input(&mut self, receiver: mpsc::Receiver<Ingress>) {
+        self.ingress = Some(receiver);
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
+    }
+
+    pub fn allocate_control_signal_id(&self) -> u64 {
+        self.next_control_signal_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) fn advance_control_signal_id_to_at_least(&self, next_id: u64) {
+        self.next_control_signal_id
+            .fetch_max(next_id, Ordering::Relaxed);
+    }
+
+    pub(crate) fn control_signal_id_allocator(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.next_control_signal_id)
+    }
+
+    /// Send StreamData to all downstream processors
+    pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
+        send_with_backpressure(
+            &self.output,
+            self.channel_capacities.data,
+            data,
+            Some(self.stats.as_ref()),
+        )
+        .await
+    }
+
+    /// Send StreamData to a specific downstream processor by id.
+    ///
+    /// The broadcast-based fan-out no longer supports targeted sends, so this
+    /// method now returns an error to signal that behavior.
+    pub async fn send_stream_data(
+        &self,
+        _processor_id: &str,
+        data: StreamData,
+    ) -> Result<(), ProcessorError> {
+        self.send(data).await
+    }
+}
+
+impl Processor for ControlSourceProcessor {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
+        let input_result = self.ingress.take().ok_or_else(|| {
+            ProcessorError::InvalidConfiguration(
+                "ControlSourceProcessor ingress must be set before starting".to_string(),
+            )
+        });
+        let output = self.output.clone();
+        let control_output = self.control_output.clone();
+        let processor_id = self.id.clone();
+        let control_signal_id_allocator = Arc::clone(&self.next_control_signal_id);
+        let stats = Arc::clone(&self.stats);
+        tracing::info!(processor_id = %processor_id, "control source processor starting");
+        let channel_capacities = self.channel_capacities;
+
+        ProcessorStart::ready(spawner.spawn(async move {
+            let input = match input_result {
+                Ok(input) => input,
+                Err(e) => return Err(e),
+            };
+
+            let mut receiver = input;
+            while let Some(ingress) = receiver.recv().await {
+                match ingress.target {
+                    IngressTarget::Data => {
+                        let is_terminal = ingress.data.is_terminal();
+                        send_with_backpressure(
+                            &output,
+                            channel_capacities.data,
+                            ingress.data,
+                            Some(stats.as_ref()),
+                        )
+                        .await?;
+                        if is_terminal {
+                            tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
+                            return Ok(());
+                        }
+                    }
+                    IngressTarget::Control => {
+                        let StreamData::Control(signal) = ingress.data else {
+                            tracing::warn!(
+                                processor_id = %processor_id,
+                                "invalid ingress: control target requires StreamData::Control"
+                            );
+                            continue;
+                        };
+
+                        let is_terminal = signal.is_terminal();
+                        send_control_with_backpressure(
+                            &control_output,
+                            channel_capacities.control,
+                            signal,
+                        )
+                        .await?;
+                        if is_terminal {
+                            tracing::info!(
+                                processor_id = %processor_id,
+                                "received terminal control signal (control)"
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            // Input closed without explicit StreamEnd, propagate shutdown on the data path.
+            tracing::info!(processor_id = %processor_id, "stopping (ingress closed)");
+            let barrier_id = control_signal_id_allocator.fetch_add(1, Ordering::Relaxed);
+            send_with_backpressure(
+                &output,
+                channel_capacities.data,
+                StreamData::control(ControlSignal::Barrier(
+                    BarrierControlSignal::StreamGracefulEnd { barrier_id },
+                )),
+                Some(stats.as_ref()),
+            )
+            .await?;
+            Ok(())
+        }))
+    }
+
+    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
+        self.output.subscribe()
+    }
+
+    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
+        self.control_output.subscribe()
+    }
+
+    fn add_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<StreamData>>,
+    {
+        tracing::warn!(
+            processor_id = %self.id,
+            "ControlSourceProcessor does not accept broadcast inputs; drop unused receiver"
+        );
+        drop(receiver.into());
+    }
+
+    fn add_control_input<R>(&mut self, receiver: R)
+    where
+        R: Into<LinkReceiver<ControlSignal>>,
+    {
+        tracing::warn!(
+            processor_id = %self.id,
+            "ControlSourceProcessor does not accept broadcast control inputs; drop unused receiver"
+        );
+        drop(receiver.into());
+    }
+}

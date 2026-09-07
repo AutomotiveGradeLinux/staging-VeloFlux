@@ -1,0 +1,47 @@
+// Copyright 2026 EMQ Technologies Co., Ltd.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+#[path = "pipeline/common.rs"]
+mod common;
+
+#[path = "pipeline/pipeline_tests.rs"]
+mod pipeline_tests;
+
+#[path = "pipeline/stateful_function_tests.rs"]
+mod stateful_function_tests;
+
+#[path = "pipeline/batching_tests.rs"]
+mod batching_tests;
+
+#[path = "pipeline/sampler_tests.rs"]
+mod sampler_tests;
+
+#[path = "pipeline/stats_tests.rs"]
+mod stats_tests;
+
+#[path = "pipeline/eventtime_tests.rs"]
+mod eventtime_tests;
+
+#[path = "pipeline/shared_stream_tests.rs"]
+mod shared_stream_tests;
+
+#[path = "pipeline/video_smoke_tests.rs"]
+mod video_smoke_tests;
+
+#[path = "pipeline/sink_compress_tests.rs"]
+mod sink_compress_tests;
+
+#[path = "pipeline/sink_encrypt_tests.rs"]
+mod sink_encrypt_tests;
+
+#[path = "pipeline/column_filter_tests.rs"]
+mod column_filter_tests;
+
+#[path = "pipeline/table_scan_tests.rs"]
+mod table_scan_tests;
+
+#[path = "pipeline/window_partition_tests.rs"]
+mod window_partition_tests;

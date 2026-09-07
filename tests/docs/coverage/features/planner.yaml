@@ -1,0 +1,101 @@
+domain: planner
+features:
+  - id: planner.logical.top_level_column_pruning
+    title: Top-level column pruning
+    summary: Prune unused top-level datasource columns during logical optimization.
+    doc_refs:
+      - docs/planner/optimize/logical/top_level_column_pruning.md
+    status: active
+
+  - id: planner.logical.struct_field_pruning
+    title: Struct field pruning
+    summary: Prune unused nested struct fields during logical optimization.
+    doc_refs:
+      - docs/planner/optimize/logical/struct_field_pruning.md
+    status: active
+
+  - id: planner.logical.list_element_pruning
+    title: List element pruning
+    summary: Prune nested fields beneath accessed list elements during logical optimization.
+    doc_refs:
+      - docs/planner/optimize/logical/list_element_pruning.md
+    status: active
+
+  - id: planner.logical.common_subexpression_elimination
+    title: Common subexpression elimination
+    summary: Introduce reusable compute nodes for eligible repeated expressions.
+    doc_refs:
+      - docs/planner/optimize/logical/common_subexpression_elimination.md
+    status: active
+
+  - id: planner.logical.schema_version_binding
+    title: Schema version binding
+    summary: Bind schema_version() to the input stream's named schema revision during planning.
+    doc_refs:
+      - docs/syntax/functions/schema_version.md
+    status: active
+
+  - id: planner.eventtime.hidden_column_preservation
+    title: Eventtime hidden column preservation
+    summary: Preserve hidden eventtime columns required by eventtime planning across projection and source-input pruning.
+    doc_refs:
+      - docs/runtime/time/pipeline_eventtime.md
+      - docs/planner/optimize/logical/top_level_column_pruning.md
+    status: active
+
+  - id: planner.physical.streaming_aggregation_rewrite
+    title: Streaming aggregation rewrite
+    summary: Rewrite eligible physical aggregation plans into streaming aggregation operators.
+    doc_refs:
+      - docs/planner/optimize/physical/streaming_aggregation_rewrite.md
+    status: active
+
+  - id: planner.physical.streaming_encoder_rewrite
+    title: Streaming encoder rewrite
+    summary: Rewrite eligible encoder branches from batch-oriented paths to streaming encoder paths.
+    doc_refs:
+      - docs/planner/optimize/physical/streaming_encoder_rewrite.md
+    status: active
+
+  - id: planner.physical.output_layout_fixed_slots
+    title: Plan-fixed output layout
+    summary: Resolve final sink output columns through planner-defined tuple and affiliate indexes.
+    doc_refs:
+      - docs/planner/performance/plan_fixed_output_slots.md
+    status: active
+
+  - id: planner.physical.sampler_placement
+    title: Sampler placement
+    summary: Place sampler operators ahead of decoder or shared-stream runtime ingestion paths when streams declare sampling.
+    doc_refs:
+      - docs/runtime/processors/sampler_strategy.md
+      - docs/runtime/sources/shared/dynamic_decode.md
+    status: active
+
+  - id: planner.physical.shared_tail_barrier_insertion
+    title: Shared tail barrier insertion
+    summary: Insert a barrier at the shared tail when multiple downstream consumers must be synchronized.
+    doc_refs:
+      - docs/runtime/processors/barrier_signal.md
+    status: active
+
+  - id: planner.logical.video_sink_identity_project_elimination
+    title: Video sink identity project elimination
+    summary: Remove complete identity video tuple projections immediately before direct video sink branches.
+    doc_refs:
+      - docs/planner/optimize/logical/eliminate_video_sink_identity_project.md
+    status: active
+
+  - id: planner.physical.sink_compress_insertion
+    title: Sink compress node insertion
+    summary: Insert PhysicalSinkCompress into the physical sink delivery pipeline when compression is configured.
+    doc_refs:
+      - docs/runtime/sinks/delivery/compress.md
+    status: active
+
+  - id: planner.physical.sink_encrypt_insertion
+    title: Sink encrypt node insertion
+    summary: Insert PhysicalSinkEncrypt into the physical sink delivery pipeline when encryption is configured.
+    doc_refs:
+      - docs/runtime/sinks/delivery/encrypt.md
+    status: active

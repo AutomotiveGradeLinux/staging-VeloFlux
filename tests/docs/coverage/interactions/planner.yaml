@@ -1,0 +1,86 @@
+domain: planner
+interactions:
+  - id: planner.physical.alias_fixed_output_layout
+    title: Alias fixed output layout
+    summary: Validate that planner-fixed value references preserve SQL-visible aliases.
+    features:
+      - parser.select.alias_computing
+      - planner.physical.output_layout_fixed_slots
+    status: active
+
+  - id: planner.physical.row_diff_fixed_output_layout
+    title: Row-diff fixed output layout
+    summary: Validate row-diff and downstream encoders using the same planner-fixed output references.
+    features:
+      - sink.output.row_diff
+      - planner.physical.output_layout_fixed_slots
+    status: active
+
+  - id: planner.physical.transform_batch_streaming_encoder
+    title: Transform batch streaming encoder
+    summary: Validate that template-transform sinks can still use the streaming encoder rewrite when batching is enabled.
+    features:
+      - sink.encoder.transform
+      - planner.physical.streaming_encoder_rewrite
+    status: active
+
+  - id: planner.physical.streaming_encoder_batch_fixed_output_layout
+    title: Streaming encoder batch fixed output layout
+    summary: Validate that streaming encoder batching preserves planner-fixed output references.
+    features:
+      - sink.output.batching
+      - planner.physical.streaming_encoder_rewrite
+      - planner.physical.output_layout_fixed_slots
+    status: active
+
+  - id: planner.physical.csv_encoder_fixed_output_layout
+    title: CSV encoder fixed output layout
+    summary: Validate CSV planning and batching against planner-fixed aliases, direct slots, and computed slots.
+    features:
+      - sink.encoder.csv_output
+      - sink.output.batching
+      - planner.physical.streaming_encoder_rewrite
+      - planner.physical.output_layout_fixed_slots
+    status: active
+
+  - id: planner.physical.row_diff_batching_fixed_output_layout
+    title: Row-diff batching fixed output layout
+    summary: Validate fixed output references across row-diff and batched streaming encoder output.
+    features:
+      - sink.output.batching
+      - planner.physical.output_layout_fixed_slots
+    status: active
+
+  - id: planner.physical.memory_collection_row_diff_materialize
+    title: Memory collection row-diff materialize
+    summary: Validate row-diff placement before memory collection materialization in collection sink planning.
+    features:
+      - sink.memory_collection.materialize
+      - sink.output.row_diff
+      - planner.physical.output_layout_fixed_slots
+    status: active
+
+  - id: planner.physical.row_diff_omit_if_empty_empty_suppress
+    title: Row-diff omit-if-empty empty suppress
+    summary: Validate empty suppress insertion after row-diff and before encoder emission for omit-if-empty sinks.
+    features:
+      - sink.output.row_diff
+      - sink.output.omit_if_empty
+      - planner.physical.output_layout_fixed_slots
+    status: active
+
+  - id: planner.eventtime.on_change_hidden_column_preservation
+    title: Eventtime on-change hidden column preservation
+    summary: Validate that eventtime-required hidden columns survive source on-change projection pruning.
+    features:
+      - planner.eventtime.hidden_column_preservation
+      - source.on_change.gating
+    status: active
+
+  - id: planner.source_on_change.hidden_tracked_column
+    title: Source on-change hidden tracked column
+    summary: Validate that source on-change tracked columns survive projection pruning even when hidden from final output.
+    features:
+      - source.on_change.gating
+      - planner.logical.top_level_column_pruning
+    status: active

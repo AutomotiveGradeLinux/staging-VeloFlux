@@ -1,0 +1,68 @@
+// Copyright 2026 EMQ Technologies Co., Ltd.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+mod file_source_checkpoint;
+mod http_sink_e2e;
+mod pipeline_stats;
+mod proto_decoder_e2e;
+mod proto_encoder_e2e;
+mod proto_schema_integration;
+mod shared_stream_stats;
+mod someip_explain;
+mod stream_upsert;
+
+use tokio::net::TcpListener;
+
+pub fn write_schema_zip(path: &std::path::Path, files: &[(&str, &[u8])]) {
+    use std::io::Write;
+
+    let file = std::fs::File::create(path).expect("create schema zip");
+    let mut archive = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, content) in files {
+        archive
+            .start_file(*name, options)
+            .expect("start schema zip entry");
+        archive.write_all(content).expect("write schema zip entry");
+    }
+    archive.finish().expect("finish schema zip");
+}
+
+pub fn http_client() -> reqwest::Client {
+    sdk::install_default_crypto_provider();
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build test http client")
+}
+
+pub fn random_suffix() -> String {
+    use rand::{distributions::Alphanumeric, Rng};
+    rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(10)
+        .map(char::from)
+        .collect()
+}
+
+pub async fn bind_manager_listener_or_skip() -> Option<TcpListener> {
+    match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => Some(listener),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipping test: binding a local listener is not permitted: {err}");
+            None
+        }
+        Err(err) => panic!("bind manager listener: {err}"),
+    }
+}
+
+pub fn default_flow_instances() -> Vec<manager::FlowInstanceSpec> {
+    vec![manager::FlowInstanceSpec {
+        id: "default".to_string(),
+        ..manager::FlowInstanceSpec::default()
+    }]
+}

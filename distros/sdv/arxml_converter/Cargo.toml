@@ -1,0 +1,14 @@
+# Copyright 2026 EMQ Technologies Co., Ltd.
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "arxml_converter"
+version = "0.1.0"
+edition = "2024"
+description = "AUTOSAR ARXML type resolver and binary decoder (CP + AP)"
+
+[dependencies]
+roxmltree = "0.20"

@@ -1,0 +1,106 @@
+domain: source
+features:
+  - id: source.memory.bytes_input
+    title: Memory bytes input
+    summary: Consume bytes-based memory topics through the documented source runtime contract.
+    doc_refs:
+      - docs/runtime/sources/memory.md
+    status: active
+
+  - id: source.memory.collection_input
+    title: Memory collection input
+    summary: Consume collection-based memory topics through the documented source runtime contract.
+    doc_refs:
+      - docs/runtime/sources/memory.md
+    status: active
+
+  - id: source.memory.layout_normalize
+    title: Memory collection layout normalize
+    summary: Normalize collection-source tuple layout to the declared stream schema before downstream processing.
+    doc_refs:
+      - docs/runtime/sources/memory.md
+    status: active
+
+  - id: source.on_change.gating
+    title: Source on-change gating
+    summary: Forward source rows only when configured tracked source columns change.
+    doc_refs:
+      - docs/runtime/sources/on_change.md
+    status: active
+
+  - id: source.mqtt.basic_ingest
+    title: MQTT source ingest
+    summary: Consume MQTT source data through the documented runtime source connector path.
+    doc_refs:
+      - docs/runtime/sources/mqtt.md
+    status: active
+
+  - id: source.mqtt.v5_ingest
+    title: MQTT 5 source ingest
+    summary: Consume MQTT 5 PUBLISH payload bytes through the source connector path.
+    doc_refs:
+      - docs/runtime/sources/mqtt.md
+    status: active
+
+  - id: source.file.stream
+    title: File source stream
+    summary: Consume file source stream lines through the documented notify-based log tailing contract.
+    doc_refs:
+      - docs/runtime/sources/file.md
+    status: active
+
+  - id: source.nng_pubsub.bytes_input
+    title: NNG pub/sub source bytes input
+    summary: Consume NNG pub/sub framed bytes through the documented source runtime contract.
+    doc_refs:
+      - docs/runtime/sources/nng_pubsub.md
+    status: active
+
+  - id: source.shared.dynamic_decode
+    title: Shared source dynamic decode
+    summary: Adjust shared-source decoding columns according to active consumer requirements.
+    doc_refs:
+      - docs/runtime/sources/shared/dynamic_decode.md
+    status: active
+
+  - id: source.shared.lifecycle
+    title: Shared source lifecycle
+    summary: Start shared-source runtime on consumer attach and reclaim it after the last consumer leaves without deleting the stream definition.
+    doc_refs:
+      - docs/runtime/sources/shared/dynamic_decode.md
+    status: active
+
+  - id: source.shared_mqtt_client.lifecycle
+    title: Shared MQTT client lifecycle
+    summary: Manage shared MQTT client runtime lifecycle and reuse semantics.
+    doc_refs:
+      - docs/runtime/sources/shared_mqtt_client.md
+    status: active
+
+  - id: source.shared_mqtt_client.v5_runtime
+    title: Shared MQTT 5 client runtime
+    summary: Receive and publish through a shared client whose connection protocol is MQTT 5.
+    doc_refs:
+      - docs/runtime/sources/shared_mqtt_client.md
+    status: active
+
+  - id: source.shared_mqtt_client.management
+    title: Shared MQTT client management
+    summary: Reconcile shared MQTT client metadata, mutation serialization, and runtime cleanup through the documented manager-owned resource model.
+    doc_refs:
+      - docs/runtime/sources/shared_mqtt_client.md
+    status: active
+
+  - id: source.history.replay
+    title: History source replay
+    summary: Consume historical source data according to the documented history-source contract.
+    doc_refs:
+      - docs/runtime/sources/history.md
+    status: active
+
+  - id: source.video.tuple_input
+    title: Video tuple input
+    summary: Consume video source frames as the documented fixed tuple schema.
+    doc_refs:
+      - docs/runtime/sources/video.md
+    status: active

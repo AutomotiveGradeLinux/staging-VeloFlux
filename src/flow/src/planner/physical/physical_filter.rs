@@ -1,0 +1,46 @@
+// Copyright 2026 EMQ Technologies Co., Ltd.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+use crate::expr::ScalarExpr;
+use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan, PipelineStateUsage};
+use crate::processor::processor_state::ProcessorState;
+use sqlparser::ast::Expr;
+use std::sync::Arc;
+
+/// Physical operator for filter operations
+///
+/// This operator represents the physical execution of filter operations,
+/// applying predicate expressions to filter records from input data.
+#[derive(Debug, Clone)]
+pub struct PhysicalFilter {
+    pub base: BasePhysicalPlan,
+    pub predicate: Expr,
+    pub scalar_predicate: ScalarExpr,
+    /// Processor-local state for pipeline state functions (e.g. `last_hit_count`).
+    /// When `Some`, `FilterProcessor` switches to row-by-row iteration and
+    /// increments the counter after each accepted row.
+    pub processor_state: Option<Arc<ProcessorState>>,
+    pub pipeline_state_usage: PipelineStateUsage,
+}
+
+impl PhysicalFilter {
+    /// Create a new PhysicalFilter
+    pub fn new(
+        predicate: Expr,
+        scalar_predicate: ScalarExpr,
+        children: Vec<Arc<PhysicalPlan>>,
+        index: i64,
+    ) -> Self {
+        let base = BasePhysicalPlan::new(children, index);
+        Self {
+            base,
+            predicate,
+            scalar_predicate,
+            processor_state: None,
+            pipeline_state_usage: PipelineStateUsage::default(),
+        }
+    }
+}

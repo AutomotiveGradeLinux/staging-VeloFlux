@@ -1,0 +1,309 @@
+# Schema Registry
+
+This document describes the schema registry system — the mechanism for
+defining, storing, and reusing named schemas in veloflux.
+
+Every schema create specification requires a positive JSON safe integer
+`revision` (`1..=9007199254740991`). The multipart upload endpoint requires the
+same value in a `revision` text field. Schema get/list and resource export return
+the persisted revision. Revision arbitration is used by both online updates and
+startup init.
+
+`PUT /schemas/:name` updates an existing named schema. An older revision is
+rejected, an equal revision is idempotent only when the definition is unchanged,
+and a newer revision replaces the stored and in-memory schema. Streams referencing
+the schema are then refreshed. Pass `restart_pipelines=true` to cascade the
+existing stream pipeline rebuild and restore flow to pipelines that reference
+those streams. Once the schema update succeeds, refresh failures do not change
+the HTTP status: the response remains `200` and reports stream, table, and
+pipeline results in `stream_refresh`, `table_refresh`, and
+`pipeline_restart.results`.
+
+For the REST API contract, see `user_docs/api/schema.md`.
+
+> **Resource IDs.** Named-schema names (used as the store key and as `schema.ref`
+> from a stream) must match `` `[A-Za-z][A-Za-z0-9_]{0,127}` `` — start with an
+> ASCII letter, then ASCII letters, digits, or underscores, up to 128 bytes.
+> Names are case-sensitive and never trimmed.
+
+## Overview
+
+The schema registry decouples schema definition from stream creation:
+
+- **Schema Registry** — a pluggable parser registry that produces `Schema`
+  (a `Vec<ColumnSchema>`) from a `type` + `props` pair.
+- **Named Schema Store** — an in-memory cache of resolved named schemas,
+  keyed by name. Schemas are parsed once at creation time (or on startup
+  restore) and cached for O(1) lookup.
+- **Stream reference** — when creating a stream, the `schema` field can
+  reference a named schema by name instead of inline-defining columns.
+
+File-backed named schemas can also be created from a ZIP package with
+`POST /schemas/:type/:name/upload`. The multipart endpoint is create-only and
+feeds its temporary package path into the same `PreparedSchemaSource` and
+Schema parser flow used by `POST /schemas`.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    POST /schemas                             │
+│  { name: "sensor", revision: 1, type: "proto", props: {...} }│
+└──────────────────┬──────────────────────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────────────────────┐
+│  SchemaRegistry                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐                  │
+│  │  "json"  │  │ "proto"  │  │  custom  │  ...             │
+│  │  parser  │  │  parser  │  │  parser  │                  │
+│  └──────────┘  └──────────┘  └──────────┘                  │
+│       │              │             │                         │
+│       ▼              ▼             ▼                         │
+│  Schema { columns: [...] }                                   │
+└──────────────────┬──────────────────────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────────────────────┐
+│  NamedSchemaStore (in-memory)                                │
+│  { "sensor" → ResolvedSchema { logical, artifact }, ... }   │
+└──────────────────┬──────────────────────────────────────────┘
+                   │
+                   │ O(1) Arc::clone
+                   ▼
+┌─────────────────────────────────────────────────────────────┐
+│  POST /streams                                               │
+│  { schema: { ref: "sensor" }, ... }                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Schema Types
+
+Each schema registered in the system has a `type` field that selects
+which parser to use. The following types are built-in:
+
+| Type     | Description                                        |
+|----------|----------------------------------------------------|
+| `json`   | Inline column definitions (existing, unchanged).   |
+| `proto`  | Derive schema from a `.proto` file and a message type name. |
+| `gbf`    | Compile a complete GBF packet layout and private CAN/LIN/SOME/IP format. |
+| `busmirror` | Compile an AUTOSAR Bus Mirroring topology and its private DBC or LDF files. |
+
+Custom types can be added via the `SchemaRegistry::register_schema()` API
+(or through a distribution-specific extension point).
+
+## Proto Schema Parser
+
+The `proto` type parses a protobuf message definition from a `.proto` file
+and maps its fields to veloflux column types.
+
+### Props
+
+| Prop             | Required | Description                                                      |
+|------------------|----------|------------------------------------------------------------------|
+| `proto_path`     | yes      | ZIP package path used when installing the named schema.          |
+| `message_type`   | yes      | Fully qualified message name, e.g. `"Sensor"` or `"com.example.Sensor"`. |
+
+The ZIP root contains exactly one `.proto` entry. Imports that are not built in
+must be stored below its same-stem companion directory. `include_paths` is not
+accepted by named-schema installation.
+
+### Type Mapping
+
+Proto field types are mapped to veloflux `ConcreteDatatype` as follows:
+
+| Proto type                          | veloflux type  |
+|-------------------------------------|----------------|
+| `double`                            | `float64`      |
+| `float`                             | `float32`      |
+| `int32`, `sint32`, `sfixed32`       | `int32`        |
+| `int64`, `sint64`, `sfixed64`       | `int64`        |
+| `uint32`, `fixed32`                 | `uint32`       |
+| `uint64`, `fixed64`                 | `uint64`       |
+| `bool`                              | `bool`         |
+| `string`                            | `string`       |
+| `bytes`                             | `bytes`        |
+| Enum                                | `int32`        |
+| Message (nested)                    | `struct`       |
+| `repeated T`                        | `list<T>`      |
+| `map<K, V>`                         | `list<struct<key: K, value: V>>` |
+| `google.protobuf.Timestamp`         | `timestamp`    |
+
+**Notes:**
+
+- Proto has no 8-bit or 16-bit integer types, so `int8`, `int16`, `uint8`,
+  `uint16`, and `null` cannot currently be expressed via proto schemas.
+- `map<K, V>` is expanded to `list<struct>` because proto3 maps are
+  syntactic sugar for a repeated entry message.
+- `oneof` fields are flattened as individual columns; mutual-exclusion
+  semantics are not preserved in the veloflux schema.
+- The parser uses `protox`, a pure-Rust protobuf compiler, so no system
+  `protoc` binary is required at runtime.
+
+### Nested Messages and Recursion
+
+Nested `message` types are recursively expanded into `struct` columns.
+A maximum nesting depth of 10 levels is enforced to prevent infinite
+recursion from circular references.
+
+### Well-Known Types
+
+| Proto type                          | veloflux type  |
+|-------------------------------------|----------------|
+| `google.protobuf.Timestamp`         | `timestamp`    |
+
+Other well-known types (`Duration`, `*Value` wrappers, etc.) are treated
+as regular nested messages and expanded to `struct`. This is deliberate —
+the veloflux type system has no direct analogues for them.
+
+### Example
+
+Given a `schemas/sensor-schema.zip` package containing `sensor.proto`:
+
+```protobuf
+syntax = "proto3";
+package com.example;
+
+message Sensor {
+  string sensor_id = 1;
+  double reading = 2;
+  int32 quality = 3;
+  bool online = 4;
+}
+```
+
+Create a named schema:
+
+```bash
+curl -s -XPOST http://127.0.0.1:8080/schemas \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "sensor_schema",
+    "revision": 1,
+    "type": "proto",
+    "props": {
+      "proto_path": "schemas/sensor-schema.zip",
+      "message_type": "com.example.Sensor"
+    }
+  }'
+```
+
+The result is equivalent to the following inline JSON schema:
+
+```json
+{
+  "columns": [
+    { "name": "sensor_id", "data_type": "string" },
+    { "name": "reading",   "data_type": "float64" },
+    { "name": "quality",   "data_type": "int32" },
+    { "name": "online",    "data_type": "bool" }
+  ]
+}
+```
+
+### Error Handling
+
+The proto parser returns clear error messages for common failure modes:
+
+| Scenario                          | Error message                                           |
+|-----------------------------------|---------------------------------------------------------|
+| Missing `proto_path`              | `"missing or empty 'proto_path' in proto schema props"` |
+| Missing `message_type`            | `"missing or empty 'message_type' in proto schema props"` |
+| File not found                    | Propagated from `protox` (e.g. `"No such file"`)       |
+| Proto syntax error                | Propagated from `protox` (e.g. `"unexpected token"`)   |
+| Message type not found            | `"message type 'X' not found in 'path.proto'"`         |
+| Referenced type not resolvable    | `"referenced message type 'X' not found"`              |
+| Nesting depth exceeded            | `"maximum nesting depth (10) exceeded at message 'X'"`  |
+| Field without type                | `"proto field without type"`                            |
+| Message field without type_name   | `"message field without type_name"`                     |
+| Unsupported field type            | `"unsupported proto field type ... for field 'X'"`     |
+
+## Stream Reference
+
+When creating a stream, the `schema.ref` field allows referencing a
+pre-defined named schema instead of inline-defining columns:
+
+```json
+{
+  "name": "my_stream",
+  "revision": 1,
+  "type": "mqtt",
+  "schema": {
+    "ref": "sensor_schema"
+  },
+  "props": {
+    "broker_url": "tcp://127.0.0.1:1883",
+    "topic": "/sensors/data",
+    "qos": 0
+  },
+  "decoder": {
+    "type": "json",
+    "props": {}
+  }
+}
+```
+
+**Important:** Stream creation resolves the schema at creation time, but the
+stored stream definition retains the `schema.ref` reference. On process
+restart (or any path that rebuilds the stream from storage), the schema is
+re-resolved from the in-memory `NamedSchemaStore`. This means that changes
+to a named schema can affect existing streams after a restart. To freeze a
+stream's schema permanently, create it with inline column definitions.
+
+## Lifecycle and Persistence
+
+```
+Create            Delete           Startup
+──────            ──────           ───────
+POST /schemas     DELETE /schemas  Process restart
+  │                  │               │
+  ▼                  ▼               ▼
+parse → Schema     check refs      storage.list_schemas()
+  │                  │               │
+  ▼                  │               ▼
+NamedSchemaStore   ┌─no refs──┐    for each stored:
+.insert()          │          │      parse → Schema
+  │                ▼          │      NamedSchemaStore.insert()
+  ▼             remove +     │
+storage          delete       │
+.create_schema()              │
+                   ┌──────────┘
+                   ▼
+              409 Conflict
+              (referenced by
+              streams: [...])
+```
+
+- **Persistence:** Schema metadata is persisted in redb. File-backed entry and
+  companion files are installed under `<data_dir>/schemas/<type>/<name>/`.
+- **Installation:** File-backed schemas are accepted only as ZIP packages whose
+  root contains one entry file and, optionally, its same-stem companion
+  directory. The installer never scans beside the ZIP or falls back to uploads.
+- **Startup restore:** On process restart, all stored schemas are
+  re-parsed and re-inserted into the in-memory `NamedSchemaStore`.
+  This happens before streams are restored, so stream references resolve
+  correctly.
+- **Export/Import:** Schema metadata and installed sources are included in the
+  export bundle and restored together during import.
+
+## Extensibility
+
+### Adding a Custom Schema Type
+
+New schema types can be registered programmatically:
+
+```rust
+use manager::stream::register_schema;
+use std::sync::Arc;
+
+fn parse_my_schema(
+    stream_name: &str,
+    props: &serde_json::Map<String, serde_json::Value>,
+) -> Result<flow::Schema, String> {
+    // Custom parsing logic here
+    todo!()
+}
+
+register_schema("my_type", Arc::new(parse_my_schema));
+```
+
+Registration must happen before any schema of that type is created
+(typically during distribution-specific initialization).

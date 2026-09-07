@@ -1,0 +1,58 @@
+// Copyright 2026 EMQ Technologies Co., Ltd.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+use flow::connector::ConnectorRegistry;
+use flow::{
+    AggregateFunctionRegistry, BuiltinEventtimeType, CustomFuncRegistry, DecoderRegistry,
+    EncoderRegistry, EventtimeTypeRegistry, PipelineRegistries, StatefulFunctionRegistry,
+};
+
+#[test]
+fn individual_registry_defaults_include_builtins() {
+    let connector_registry = ConnectorRegistry::default();
+    assert!(connector_registry.is_registered("nop"));
+    #[cfg(feature = "nng_pubsub")]
+    assert!(connector_registry.is_registered("nng_pubsub"));
+
+    let encoder_registry = EncoderRegistry::default();
+    assert!(encoder_registry.is_registered("json"));
+
+    let decoder_registry = DecoderRegistry::default();
+    assert!(decoder_registry.is_registered("json"));
+
+    let aggregate_registry = AggregateFunctionRegistry::default();
+    assert!(aggregate_registry.is_registered("sum"));
+    assert!(aggregate_registry.is_registered("last_row"));
+
+    let stateful_registry = StatefulFunctionRegistry::default();
+    assert!(stateful_registry.is_registered("lag"));
+    assert!(stateful_registry.is_registered("acc_sum"));
+
+    let custom_func_registry = CustomFuncRegistry::default();
+    assert!(custom_func_registry.is_registered("concat"));
+
+    let eventtime_registry = EventtimeTypeRegistry::default();
+    assert!(eventtime_registry.is_registered(BuiltinEventtimeType::UnixtimestampSeconds.key()));
+    assert!(eventtime_registry.is_registered(BuiltinEventtimeType::UnixtimestampMillis.key()));
+}
+
+#[test]
+fn pipeline_registries_default_uses_builtins() {
+    let registries = PipelineRegistries::default();
+    assert!(registries.connector_registry().is_registered("nop"));
+    #[cfg(feature = "nng_pubsub")]
+    assert!(registries.connector_registry().is_registered("nng_pubsub"));
+
+    assert!(registries.encoder_registry().is_registered("json"));
+    assert!(registries.decoder_registry().is_registered("json"));
+    assert!(registries.aggregate_registry().is_registered("sum"));
+    assert!(registries.stateful_registry().is_registered("lag"));
+    assert!(registries.stateful_registry().is_registered("acc_sum"));
+    assert!(registries.custom_func_registry().is_registered("concat"));
+    assert!(registries
+        .eventtime_type_registry()
+        .is_registered(BuiltinEventtimeType::UnixtimestampSeconds.key()));
+}

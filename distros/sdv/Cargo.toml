@@ -1,0 +1,66 @@
+# Copyright 2026 EMQ Technologies Co., Ltd.
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+[package]
+name = "veloflux-sdv"
+version = "0.4.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "gbf_gen"
+path = "src/bin/gbf_gen.rs"
+
+[features]
+default = ["wasm_udf", "nng_pubsub"]
+wasm_udf = ["manager/wasm_udf"]
+nng_pubsub = ["flow/nng_pubsub"]
+
+[dependencies]
+flow = { path = "../../src/flow" }
+manager = { path = "../../src/manager", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+datatypes = { path = "../../src/datatypes" }
+tracing = "0.1.44"
+itoa = "1"
+ryu = "1"
+arxml_converter = { path = "./arxml_converter" }
+
+chrono = "=0.4.42"
+can-dbc = "10"
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+hex = "0.4"
+rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+base64 = "0.22.1"
+bytes = "1"
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+serial_test = "3"
+criterion = "0.5"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+tokio = { version = "1", features = ["macros", "rt", "time", "test-util"] }
+
+[[bench]]
+name = "schema_load"
+harness = false
+
+[[bench]]
+name = "decoder_projection"
+harness = false
+
+[[bench]]
+name = "gbf_fused"
+harness = false
+
+[[bench]]
+name = "busmirror_decode"
+harness = false

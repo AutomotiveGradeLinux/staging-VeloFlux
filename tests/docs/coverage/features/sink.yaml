@@ -1,0 +1,120 @@
+domain: sink
+features:
+  - id: sink.connector.memory_output
+    title: Memory sink connector
+    summary: Emit pipeline output through the memory sink connector contract.
+    doc_refs:
+      - docs/runtime/sinks/connectors/memory.md
+    status: active
+
+  - id: sink.connector.mqtt_output
+    title: MQTT sink connector
+    summary: Emit pipeline output through the MQTT sink connector contract.
+    doc_refs:
+      - docs/runtime/sinks/connectors/mqtt.md
+    status: active
+
+  - id: sink.connector.mqtt_v5_user_properties
+    title: MQTT 5 static User Properties
+    summary: Render process property templates and publish ordered User Properties, including duplicate keys, through MQTT 5.
+    doc_refs:
+      - docs/runtime/sinks/connectors/mqtt.md
+    status: active
+
+  - id: sink.connector.nng_pubsub_output
+    title: NNG pub/sub sink connector
+    summary: Emit encoded pipeline output through the documented NNG pub/sub sink connector contract.
+    doc_refs:
+      - docs/runtime/sinks/connectors/nng_pubsub.md
+    status: active
+
+  - id: sink.connector.file_output
+    title: File sink connector
+    summary: Emit encoded pipeline output through the documented local file sink connector contract.
+    doc_refs:
+      - docs/runtime/sinks/connectors/file.md
+    status: active
+
+  - id: sink.memory_collection.materialize
+    title: Memory collection materialize
+    summary: Materialize sink output rows into the stable memory collection sink layout.
+    doc_refs:
+      - docs/runtime/sinks/connectors/memory.md
+    status: active
+
+  - id: sink.encoder.transform
+    title: Encoder transform
+    summary: Apply template-based encoder transforms before sink emission when configured.
+    doc_refs:
+      - docs/runtime/sinks/encoders/encoder_transform.md
+    status: active
+
+  - id: sink.encoder.csv_output
+    title: CSV sink encoder
+    summary: Encode the planner-fixed sink output layout as configurable streaming CSV bytes.
+    doc_refs:
+      - docs/runtime/sinks/encoders/csv.md
+    status: active
+
+  - id: sink.encoder.ndjson_output
+    title: NDJSON sink encoder output
+    summary: Encode each JSON sink output row as one compact LF-terminated JSON text.
+    doc_refs:
+      - docs/runtime/sinks/encoders/json_encoder_options.md
+    status: active
+
+  - id: sink.output.row_diff
+    title: Row diff output
+    summary: Produce row-diff output according to the documented sink-output contract.
+    doc_refs:
+      - docs/runtime/sinks/output/row_diff_output.md
+    status: active
+
+  - id: sink.output.batching
+    title: Sink output batching
+    summary: Buffer sink output rows according to configured batch count and duration semantics before emission.
+    doc_refs:
+      - docs/runtime/sinks/README.md
+    status: active
+
+  - id: sink.output.omit_if_empty
+    title: Omit-if-empty output
+    summary: Suppress sink output when the documented omit-if-empty condition is met.
+    doc_refs:
+      - docs/runtime/sinks/output/omit_if_empty.md
+    status: active
+
+  - id: sink.connector.video_output
+    title: Video sink connector
+    summary: Emit video tuple output through the documented video sink connector contract.
+    doc_refs:
+      - docs/runtime/sinks/connectors/video.md
+    status: active
+
+  - id: sink.compress.gzip_delivery
+    title: Gzip compression delivery transform
+    summary: Apply gzip compression to sink delivery output via PhysicalSinkCompress.
+    doc_refs:
+      - docs/runtime/sinks/delivery/compress.md
+    status: active
+
+  - id: sink.compress.zstd_delivery
+    title: Zstd compression delivery transform
+    summary: Apply zstd compression to sink delivery output via PhysicalSinkCompress.
+    doc_refs:
+      - docs/runtime/sinks/delivery/compress.md
+    status: active
+
+  - id: sink.encrypt.aes_gcm_delivery
+    title: AES-GCM encryption delivery transform
+    summary: Apply AES-GCM authenticated encryption to sink delivery output via PhysicalSinkEncrypt.
+    doc_refs:
+      - docs/runtime/sinks/delivery/encrypt.md
+    status: active
+
+  - id: sink.encrypt.inline_key_config
+    title: Sink encryption inline key config
+    summary: Decode inline sink encryption key material while keeping key bytes out of explain output, logs, and errors.
+    doc_refs:
+      - docs/runtime/sinks/delivery/encrypt.md
+    status: active

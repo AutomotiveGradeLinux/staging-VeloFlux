@@ -1,0 +1,67 @@
+domain: sink
+interactions:
+  - id: sink.memory_delta_omit_if_empty
+    title: Memory delta omit-if-empty output
+    summary: Validate memory sink emission together with omit-if-empty suppression for unchanged delta collection output.
+    features:
+      - sink.connector.memory_output
+      - sink.output.omit_if_empty
+    status: active
+
+  - id: sink.csv_batched_delivery
+    title: CSV encoder batched delivery
+    summary: Validate fixed-layout CSV records and one header per common sink batch delivery.
+    features:
+      - sink.encoder.csv_output
+      - sink.output.batching
+    status: active
+
+  - id: sink.csv_file_delivery
+    title: CSV encoder file delivery
+    summary: Validate parseable CSV bytes delivered through the file sink connector.
+    features:
+      - sink.encoder.csv_output
+      - sink.connector.file_output
+    status: active
+
+  - id: sink.ndjson_batched_file_delivery
+    title: NDJSON encoder batched file delivery
+    summary: Validate compact LF-delimited JSON rows delivered through common batching to one file.
+    features:
+      - sink.encoder.ndjson_output
+      - sink.output.batching
+      - sink.connector.file_output
+    status: active
+
+  - id: sink.encoder_gzip_file_delivery
+    title: Encoder + gzip compress + file connector delivery
+    summary: Validate that encoder output passes through gzip compression and is correctly written by the file connector.
+    features:
+      - sink.compress.gzip_delivery
+      - sink.connector.file_output
+    status: active
+
+  - id: sink.encoder_zstd_file_delivery
+    title: Encoder + zstd compress + file connector delivery
+    summary: Validate that encoder output passes through zstd compression and is correctly written by the file connector.
+    features:
+      - sink.compress.zstd_delivery
+      - sink.connector.file_output
+    status: active
+
+  - id: sink.encoder_aes_file_delivery
+    title: Encoder + AES encrypt + file connector delivery
+    summary: Validate that encoder output passes through AES encryption and is correctly written by the file connector.
+    features:
+      - sink.encrypt.aes_gcm_delivery
+      - sink.connector.file_output
+    status: active
+
+  - id: sink.encoder_gzip_aes_file_delivery
+    title: Encoder + gzip compress + AES encrypt + file connector delivery
+    summary: Validate that compressed encoder output passes through AES encryption and is correctly written by the file connector.
+    features:
+      - sink.compress.gzip_delivery
+      - sink.encrypt.aes_gcm_delivery
+      - sink.connector.file_output
+    status: active

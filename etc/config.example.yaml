@@ -1,0 +1,45 @@
+# Copyright 2026 EMQ Technologies Co., Ltd.
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+properties:
+  vin: "L123456789"
+  site_code: "cn"
+
+logging:
+  output: stdout
+  level: info
+  include_source: true
+  disable_timestamp: false
+  file:
+    dir: "./logs"
+    file_name: "app.log"
+    rotation:
+      keep_days: 7
+      max_num: 30
+      max_size_mb: 256
+  syslog:
+    enable: false
+    level: info
+    tag: "veloflux"
+    # Use an explicit Unix datagram socket path.
+    network: unixgram
+    address: /var/run/syslog
+
+profiling:
+  enabled: true
+  addr: "0.0.0.0:6060"
+  cpu_profile_freq_hz: 100
+
+metrics:
+  poll_interval_secs: 5
+
+server:
+  manager_addr: "0.0.0.0:8080"
+  flow_instances:
+    - id: "default"
+      backend: "in_process"
+      runtime:
+        thread_name_prefix: "vf-default"

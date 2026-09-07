@@ -1,0 +1,58 @@
+// Copyright 2026 EMQ Technologies Co., Ltd.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+use std::sync::atomic::{AtomicI64, AtomicU64};
+use std::sync::Arc;
+
+/// The set of SQL-visible function names that read pipeline state.
+///
+/// When the parser or expression converter encounters one of these
+/// function names, it produces a `ScalarExpr::PipelineState` that is
+/// resolved to `ScalarExpr::ProcessorState` during physical plan building.
+pub const BUILTIN_PIPELINE_STATE_FUNCTIONS: &[&str] = &[
+    "last_hit_count",
+    "last_agg_hit_count",
+    "last_hit_time_unix_ms",
+];
+
+/// Returns `true` if `name` (case-insensitive) is a built-in pipeline state function.
+pub fn is_pipeline_state_function(name: &str) -> bool {
+    BUILTIN_PIPELINE_STATE_FUNCTIONS
+        .iter()
+        .any(|f| f.eq_ignore_ascii_case(name))
+}
+
+/// Processor-local state for tracking pipeline-level runtime counters.
+///
+/// Each processor that needs to observe pipeline state holds its own
+/// `ProcessorState` instance. The same
+/// `Arc<AtomicU64>` backing the counter is embedded in `ScalarExpr` via the
+/// `ScalarExpr::ProcessorState` variant, enabling lock-free reads during
+/// expression evaluation without signature changes.
+///
+/// See `docs/syntax/language/pipeline_state.md` for the full design.
+#[derive(Debug, Clone)]
+pub struct ProcessorState {
+    pub last_hit_count: Arc<AtomicU64>,
+    pub last_agg_hit_count: Arc<AtomicU64>,
+    pub last_hit_time_unix_ms: Arc<AtomicI64>,
+}
+
+impl ProcessorState {
+    pub fn new() -> Self {
+        Self {
+            last_hit_count: Arc::new(AtomicU64::new(0)),
+            last_agg_hit_count: Arc::new(AtomicU64::new(0)),
+            last_hit_time_unix_ms: Arc::new(AtomicI64::new(0)),
+        }
+    }
+}
+
+impl Default for ProcessorState {
+    fn default() -> Self {
+        Self::new()
+    }
+}

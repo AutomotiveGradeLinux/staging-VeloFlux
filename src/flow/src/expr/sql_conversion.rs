@@ -1,0 +1,1013 @@
+// Copyright 2026 EMQ Technologies Co., Ltd.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+use super::custom_func::string_func::maybe_specialize_literal_regex_func;
+use super::custom_func::CustomFuncRegistry;
+use super::func::{BinaryFunc, UnaryFunc};
+use super::internal_columns::is_internal_derived;
+use super::scalar::{ScalarExpr, WindowMetadataField};
+use crate::expr::ProcStateField;
+use crate::processor::processor_state::is_pipeline_state_function;
+use datatypes::{BooleanType, ConcreteDatatype, Float64Type, Int64Type, Schema, StringType, Value};
+use sqlparser::ast::{
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, Ident, UnaryOperator,
+    Value as SqlValue,
+};
+use std::sync::{Arc, OnceLock};
+
+/// Binding between SQL sources (table/alias) and schemas.
+#[derive(Clone, Debug, Default)]
+pub struct SchemaBinding {
+    entries: Vec<SchemaBindingEntry>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SchemaBindingEntry {
+    pub source_name: String,
+    pub alias: Option<String>,
+    pub schema: Arc<Schema>,
+    pub kind: SourceBindingKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceBindingKind {
+    Regular,
+    Shared,
+    /// A bounded table scan source. Keep the full schema until table scan supports decode projection.
+    TableScan,
+    /// A memory stream consumed in collection mode (decoder.type = "none").
+    ///
+    /// This kind must preserve the full schema to keep `ColumnRef::ByIndex` semantics stable.
+    MemoryCollection,
+}
+
+impl SchemaBinding {
+    pub fn new(entries: Vec<SchemaBindingEntry>) -> Self {
+        Self { entries }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn entries(&self) -> &[SchemaBindingEntry] {
+        &self.entries
+    }
+
+    pub fn add_entry(&mut self, entry: SchemaBindingEntry) {
+        self.entries.push(entry);
+    }
+}
+
+fn find_column_index(schema: &Schema, column_name: &str) -> Option<usize> {
+    schema.column_index(column_name)
+}
+
+impl SchemaBindingEntry {
+    pub fn matches(&self, qualifier: &str) -> bool {
+        self.source_name == qualifier
+            || self
+                .alias
+                .as_ref()
+                .map(|alias| alias == qualifier)
+                .unwrap_or(false)
+    }
+
+    pub fn is_shared(&self) -> bool {
+        matches!(self.kind, SourceBindingKind::Shared)
+    }
+
+    pub fn is_memory_collection(&self) -> bool {
+        matches!(self.kind, SourceBindingKind::MemoryCollection)
+    }
+}
+
+/// Enhanced error types for expression conversion with schema support
+#[derive(Debug, Clone)]
+pub enum ConversionError {
+    UnsupportedExpression(String),
+    UnsupportedOperator(String),
+    TypeConversionError(String),
+    ColumnNotFound(String),
+    InvalidColumnReference(String),
+}
+
+impl std::fmt::Display for ConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConversionError::UnsupportedExpression(expr) => {
+                write!(f, "Unsupported expression: {}", expr)
+            }
+            ConversionError::UnsupportedOperator(op) => write!(f, "Unsupported operator: {}", op),
+            ConversionError::TypeConversionError(msg) => {
+                write!(f, "Type conversion error: {}", msg)
+            }
+            ConversionError::ColumnNotFound(name) => write!(f, "Column not found: {}", name),
+            ConversionError::InvalidColumnReference(ref_str) => {
+                write!(f, "Invalid column reference: {}", ref_str)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConversionError {}
+
+/// Convert SQL Value to ScalarExpr literal
+fn convert_sql_value_to_scalar(value: &SqlValue) -> Result<ScalarExpr, ConversionError> {
+    match value {
+        SqlValue::Number(s, _) => {
+            if let Ok(i) = s.parse::<i64>() {
+                Ok(ScalarExpr::Literal(
+                    Value::Int64(i),
+                    ConcreteDatatype::Int64(Int64Type),
+                ))
+            } else if let Ok(f) = s.parse::<f64>() {
+                Ok(ScalarExpr::Literal(
+                    Value::Float64(f),
+                    ConcreteDatatype::Float64(Float64Type),
+                ))
+            } else {
+                Err(ConversionError::TypeConversionError(format!(
+                    "Cannot parse number: {}",
+                    s
+                )))
+            }
+        }
+        SqlValue::SingleQuotedString(s) => Ok(ScalarExpr::Literal(
+            Value::String(s.clone()),
+            ConcreteDatatype::String(StringType),
+        )),
+        SqlValue::DoubleQuotedString(s) => Ok(ScalarExpr::Literal(
+            Value::String(s.clone()),
+            ConcreteDatatype::String(StringType),
+        )),
+        SqlValue::Boolean(b) => Ok(ScalarExpr::Literal(
+            Value::Bool(*b),
+            ConcreteDatatype::Bool(BooleanType),
+        )),
+        SqlValue::Null => Ok(ScalarExpr::Literal(
+            Value::Null,
+            ConcreteDatatype::Int64(Int64Type),
+        )),
+        _ => Err(ConversionError::TypeConversionError(format!(
+            "Unsupported value type: {:?}",
+            value
+        ))),
+    }
+}
+
+/// Convert SQL BinaryOperator to flow BinaryFunc
+fn convert_binary_op(op: &BinaryOperator) -> Result<BinaryFunc, ConversionError> {
+    use sqlparser::ast::BinaryOperator;
+
+    match op {
+        BinaryOperator::Plus => Ok(BinaryFunc::Add),
+        BinaryOperator::Minus => Ok(BinaryFunc::Sub),
+        BinaryOperator::Multiply => Ok(BinaryFunc::Mul),
+        BinaryOperator::Divide => Ok(BinaryFunc::Div),
+        BinaryOperator::Modulo => Ok(BinaryFunc::Mod),
+        BinaryOperator::And => Ok(BinaryFunc::And),
+        BinaryOperator::Or => Ok(BinaryFunc::Or),
+        BinaryOperator::Eq => Ok(BinaryFunc::Eq),
+        BinaryOperator::NotEq => Ok(BinaryFunc::NotEq),
+        BinaryOperator::Lt => Ok(BinaryFunc::Lt),
+        BinaryOperator::LtEq => Ok(BinaryFunc::Lte),
+        BinaryOperator::Gt => Ok(BinaryFunc::Gt),
+        BinaryOperator::GtEq => Ok(BinaryFunc::Gte),
+        _ => Err(ConversionError::UnsupportedOperator(format!("{:?}", op))),
+    }
+}
+
+/// Convert SQL UnaryOperator to flow UnaryFunc
+fn convert_unary_op(op: &UnaryOperator) -> Result<UnaryFunc, ConversionError> {
+    use sqlparser::ast::UnaryOperator;
+
+    match op {
+        UnaryOperator::Not => Ok(UnaryFunc::Not),
+        UnaryOperator::Minus => Ok(UnaryFunc::Neg),
+        _ => Err(ConversionError::UnsupportedOperator(format!("{:?}", op))),
+    }
+}
+
+/// Convert sqlparser Expression to flow ScalarExpr
+pub fn convert_expr_to_scalar(expr: &Expr) -> Result<ScalarExpr, ConversionError> {
+    convert_expr_to_scalar_with_bindings(expr, &SchemaBinding::empty())
+}
+
+/// Convert sqlparser Expression to flow ScalarExpr with explicit column bindings.
+pub fn convert_expr_to_scalar_with_bindings(
+    expr: &Expr,
+    bindings: &SchemaBinding,
+) -> Result<ScalarExpr, ConversionError> {
+    convert_expr_to_scalar_with_bindings_and_custom_registry(
+        expr,
+        bindings,
+        default_custom_func_registry().as_ref(),
+    )
+}
+
+/// Convert sqlparser Expression to flow ScalarExpr with explicit column bindings and custom function registry.
+pub fn convert_expr_to_scalar_with_bindings_and_custom_registry(
+    expr: &Expr,
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    convert_expr_to_scalar_internal(expr, bindings, custom_func_registry)
+}
+
+fn default_custom_func_registry() -> &'static Arc<CustomFuncRegistry> {
+    static REGISTRY: OnceLock<Arc<CustomFuncRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(CustomFuncRegistry::with_builtins)
+}
+
+fn convert_expr_to_scalar_internal(
+    expr: &Expr,
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    match expr {
+        // Simple column reference like "a"
+        Expr::Identifier(ident) => convert_identifier_to_column(ident, bindings),
+
+        // Compound identifier like "table.column"
+        Expr::CompoundIdentifier(idents) => convert_compound_identifier_to_column(idents, bindings),
+
+        // Literals like 1, 'hello', true
+        Expr::Value(value) => convert_sql_value_to_scalar(value),
+
+        // Binary operations like a + b, a * b
+        Expr::BinaryOp { left, op, right } => {
+            let left_expr = convert_expr_to_scalar_internal(left, bindings, custom_func_registry)?;
+            let right_expr =
+                convert_expr_to_scalar_internal(right, bindings, custom_func_registry)?;
+            let binary_func = convert_binary_op(op)?;
+
+            Ok(ScalarExpr::CallBinary {
+                func: binary_func,
+                expr1: Box::new(left_expr),
+                expr2: Box::new(right_expr),
+            })
+        }
+
+        // Unary operations like -a, NOT b
+        Expr::UnaryOp { op, expr: operand } => {
+            let operand_expr =
+                convert_expr_to_scalar_internal(operand, bindings, custom_func_registry)?;
+            let unary_func = convert_unary_op(op)?;
+
+            Ok(ScalarExpr::CallUnary {
+                func: unary_func,
+                expr: Box::new(operand_expr),
+            })
+        }
+
+        // Function calls like CONCAT(a, b), UPPER(name)
+        Expr::Function(function) => {
+            let Function { name, args, .. } = function;
+            let function_name = name
+                .0
+                .last()
+                .map(|ident| ident.value.to_lowercase())
+                .unwrap_or_default();
+
+            // Pipeline state functions (e.g. last_hit_count()) are converted to
+            // a placeholder that is resolved to ScalarExpr::ProcessorState during
+            // physical plan building.
+            if is_pipeline_state_function(&function_name) {
+                validate_pipeline_state_function(function, &function_name)?;
+                let field = match function_name.as_str() {
+                    "last_hit_count" => ProcStateField::LastHitCount,
+                    "last_hit_time_unix_ms" => ProcStateField::LastHitTimeUnixMs,
+                    "last_agg_hit_count" => ProcStateField::LastAggHitCount,
+                    _ => {
+                        return Err(ConversionError::UnsupportedExpression(format!(
+                            "unknown pipeline state function {function_name}()"
+                        )));
+                    }
+                };
+                return Ok(ScalarExpr::PipelineState { field });
+            }
+
+            if is_window_metadata_function(&function_name) {
+                validate_window_metadata_function(function, &function_name)?;
+                let field = match function_name.as_str() {
+                    "window_start" => WindowMetadataField::Start,
+                    "window_end" => WindowMetadataField::End,
+                    _ => {
+                        return Err(ConversionError::UnsupportedExpression(format!(
+                            "unknown window metadata function {function_name}()"
+                        )));
+                    }
+                };
+                return Ok(ScalarExpr::WindowMetadata { field });
+            }
+
+            convert_function_call(name, args, bindings, custom_func_registry)
+        }
+
+        // Parenthesized expressions like (a + b)
+        Expr::Nested(inner_expr) => {
+            convert_expr_to_scalar_internal(inner_expr, bindings, custom_func_registry)
+        }
+
+        // BETWEEN expressions like a BETWEEN 1 AND 10
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated,
+        } => convert_between_expression(expr, low, high, *negated, bindings, custom_func_registry),
+
+        // IN expressions like a IN (1, 2, 3)
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => convert_in_list_expression(expr, list, *negated, bindings, custom_func_registry),
+
+        // CASE expressions
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => convert_case_expression(
+            operand,
+            conditions,
+            results,
+            else_result,
+            bindings,
+            custom_func_registry,
+        ),
+
+        // Struct field access like a->b
+        Expr::JsonAccess {
+            left,
+            operator,
+            right,
+        } => convert_json_access(left, operator, right, bindings, custom_func_registry),
+
+        // List indexing like a[0]
+        Expr::MapAccess { column, keys } => {
+            convert_map_access(column, keys, bindings, custom_func_registry)
+        }
+
+        _ => Err(ConversionError::UnsupportedExpression(format!(
+            "{:?}",
+            expr
+        ))),
+    }
+}
+
+fn validate_pipeline_state_function(
+    function: &Function,
+    function_name: &str,
+) -> Result<(), ConversionError> {
+    if !function.args.is_empty() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() takes zero arguments"
+        )));
+    }
+    if function.filter.is_some() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support FILTER"
+        )));
+    }
+    if function.over.is_some() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support OVER"
+        )));
+    }
+    if !function.order_by.is_empty() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support ORDER BY"
+        )));
+    }
+    Ok(())
+}
+
+fn is_window_metadata_function(function_name: &str) -> bool {
+    function_name.eq_ignore_ascii_case("window_start")
+        || function_name.eq_ignore_ascii_case("window_end")
+}
+
+fn validate_window_metadata_function(
+    function: &Function,
+    function_name: &str,
+) -> Result<(), ConversionError> {
+    if !function.args.is_empty() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() takes zero arguments"
+        )));
+    }
+    if function.filter.is_some() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support FILTER"
+        )));
+    }
+    if function.over.is_some() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support OVER"
+        )));
+    }
+    if !function.order_by.is_empty() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "{function_name}() does not support ORDER BY"
+        )));
+    }
+    Ok(())
+}
+
+/// Convert simple Identifier to Column reference
+fn convert_identifier_to_column(
+    ident: &Ident,
+    bindings: &SchemaBinding,
+) -> Result<ScalarExpr, ConversionError> {
+    let column_name = &ident.value;
+    if column_name == "*" {
+        return Ok(ScalarExpr::wildcard_all());
+    }
+
+    if is_internal_derived(column_name) {
+        // Aggregation placeholders (e.g., col_1) are produced during aggregate rewrite
+        // and do not belong to any source schema. Treat them as derived columns.
+        return Ok(ScalarExpr::column_with_column_name(column_name.to_string()));
+    }
+
+    if bindings.entries().is_empty() {
+        return Ok(ScalarExpr::column_with_column_name(column_name.to_string()));
+    }
+
+    match resolve_column_binding(None, column_name, bindings) {
+        Ok((source_name, index)) => {
+            ScalarExpr::column_with_index(source_name, column_name.to_string(), Some(index))
+                .map_err(ConversionError::InvalidColumnReference)
+        }
+        Err(_err) => Err(ConversionError::ColumnNotFound(format!(
+            "No schema bindings available for identifier '{}",
+            column_name
+        ))),
+    }
+}
+
+/// Convert CompoundIdentifier to Column reference
+/// Only handles cases 1 and 2 as specified:
+/// - Case 1: simple identifier (already handled by convert_identifier_to_column)
+/// - Case 2: table.column format where we use both source_name and column_name
+fn convert_compound_identifier_to_column(
+    idents: &[Ident],
+    bindings: &SchemaBinding,
+) -> Result<ScalarExpr, ConversionError> {
+    if let Some(last_ident) = idents.last() {
+        if last_ident.value == "*" {
+            if idents.len() == 1 {
+                return Ok(ScalarExpr::wildcard_all());
+            }
+            let qualifier = idents[..idents.len() - 1]
+                .iter()
+                .map(|ident| ident.value.clone())
+                .collect::<Vec<_>>()
+                .join(".");
+            return Ok(ScalarExpr::wildcard_for(qualifier));
+        }
+    }
+
+    match idents.len() {
+        1 => {
+            // Simple identifier case - delegate to existing function
+            convert_identifier_to_column(&idents[0], bindings)
+        }
+        2 => {
+            // table.column format - use both source_name and column_name directly
+            let source_name = &idents[0].value;
+            let column_name = &idents[1].value;
+
+            if bindings.entries().is_empty() {
+                return Err(ConversionError::ColumnNotFound(format!(
+                    "No schema bindings available for compound identifier '{}.{}",
+                    source_name, column_name
+                )));
+            }
+            let (resolved_source, index) =
+                resolve_column_binding(Some(source_name), column_name, bindings)?;
+            ScalarExpr::column_with_index(resolved_source, column_name, Some(index))
+                .map_err(ConversionError::InvalidColumnReference)
+        }
+        _ => Err(ConversionError::InvalidColumnReference(format!(
+            "Unsupported compound identifier with {} parts. Only 1 or 2 parts are supported.",
+            idents.len()
+        ))),
+    }
+}
+
+fn resolve_column_binding(
+    qualifier: Option<&str>,
+    column_name: &str,
+    bindings: &SchemaBinding,
+) -> Result<(String, usize), ConversionError> {
+    if let Some(qualifier) = qualifier {
+        let binding = bindings
+            .entries()
+            .iter()
+            .find(|binding| binding.matches(qualifier))
+            .ok_or_else(|| ConversionError::ColumnNotFound(qualifier.to_string()))?;
+        let index = find_column_index(binding.schema.as_ref(), column_name).ok_or_else(|| {
+            ConversionError::ColumnNotFound(format!("{}.{}", qualifier, column_name))
+        })?;
+        return Ok((binding.source_name.clone(), index));
+    }
+
+    let mut matches = bindings.entries().iter().filter_map(|binding| {
+        find_column_index(binding.schema.as_ref(), column_name)
+            .map(|idx| (binding.source_name.clone(), idx))
+    });
+
+    if let Some(first) = matches.next() {
+        if matches.next().is_some() {
+            return Err(ConversionError::InvalidColumnReference(format!(
+                "Ambiguous column reference: {}",
+                column_name
+            )));
+        }
+        Ok(first)
+    } else {
+        Err(ConversionError::ColumnNotFound(column_name.to_string()))
+    }
+}
+
+/// Convert JsonAccess (struct field access like a->b) to ScalarExpr
+fn convert_json_access(
+    left: &Expr,
+    operator: &sqlparser::ast::JsonOperator,
+    right: &Expr,
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    // Only support Arrow operator for now
+    match operator {
+        sqlparser::ast::JsonOperator::Arrow => {
+            // Convert the struct container (left side)
+            let struct_expr =
+                convert_expr_to_scalar_internal(left, bindings, custom_func_registry)?;
+
+            convert_relative_access_expr(struct_expr, right, bindings, custom_func_registry)
+        }
+        _ => Err(ConversionError::UnsupportedOperator(format!(
+            "{:?}",
+            operator
+        ))),
+    }
+}
+
+fn convert_relative_access_expr(
+    base: ScalarExpr,
+    expr: &Expr,
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    match expr {
+        Expr::Nested(inner) => {
+            convert_relative_access_expr(base, inner.as_ref(), bindings, custom_func_registry)
+        }
+        Expr::Identifier(ident) => Ok(ScalarExpr::field_access(base, ident.value.clone())),
+        Expr::JsonAccess {
+            left,
+            operator: sqlparser::ast::JsonOperator::Arrow,
+            right,
+        } => {
+            let mid =
+                convert_relative_access_expr(base, left.as_ref(), bindings, custom_func_registry)?;
+            convert_relative_access_expr(mid, right.as_ref(), bindings, custom_func_registry)
+        }
+        Expr::MapAccess { column, keys } => {
+            if keys.is_empty() {
+                return Err(ConversionError::UnsupportedExpression(
+                    "MapAccess requires at least one key".to_string(),
+                ));
+            }
+            if keys.len() > 1 {
+                return Err(ConversionError::UnsupportedExpression(
+                    "Multiple keys in MapAccess not yet supported".to_string(),
+                ));
+            }
+
+            let container = convert_relative_access_expr(
+                base,
+                column.as_ref(),
+                bindings,
+                custom_func_registry,
+            )?;
+            let key_expr =
+                convert_expr_to_scalar_internal(&keys[0], bindings, custom_func_registry)?;
+            Ok(ScalarExpr::list_index(container, key_expr))
+        }
+        _ => Err(ConversionError::UnsupportedExpression(
+            "Struct field access right side must be an identifier".to_string(),
+        )),
+    }
+}
+
+/// Convert MapAccess (list indexing like a[0]) to ScalarExpr
+fn convert_map_access(
+    column: &Expr,
+    keys: &[Expr],
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    if keys.is_empty() {
+        return Err(ConversionError::UnsupportedExpression(
+            "MapAccess requires at least one key".to_string(),
+        ));
+    }
+
+    if keys.len() > 1 {
+        return Err(ConversionError::UnsupportedExpression(
+            "Multiple keys in MapAccess not yet supported".to_string(),
+        ));
+    }
+
+    // Convert the container (column)
+    let container_expr = convert_expr_to_scalar_internal(column, bindings, custom_func_registry)?;
+
+    // Convert the key (index) - should be a literal value
+    let key_expr = convert_expr_to_scalar_internal(&keys[0], bindings, custom_func_registry)?;
+
+    // Use the proper ListIndex variant instead of CallDf
+    Ok(ScalarExpr::list_index(container_expr, key_expr))
+}
+
+/// Convert function call
+fn convert_function_call(
+    name: &sqlparser::ast::ObjectName,
+    args: &[FunctionArg],
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    let function_name = name.to_string().to_lowercase();
+    let custom_func = custom_func_registry.get(&function_name).ok_or_else(|| {
+        ConversionError::UnsupportedExpression(format!(
+            "Unknown function: '{}'. Available custom functions: {:?}",
+            function_name,
+            custom_func_registry.list_names()
+        ))
+    })?;
+
+    let mut scalar_args = Vec::new();
+
+    for arg in args {
+        match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
+                scalar_args.push(convert_expr_to_scalar_internal(
+                    expr,
+                    bindings,
+                    custom_func_registry,
+                )?);
+            }
+            FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(object_name)) => {
+                let qualifier = object_name
+                    .0
+                    .iter()
+                    .map(|ident| ident.value.clone())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                scalar_args.push(ScalarExpr::wildcard_for(qualifier));
+            }
+            FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
+                scalar_args.push(ScalarExpr::wildcard_all());
+            }
+            FunctionArg::Named {
+                arg: FunctionArgExpr::Expr(arg),
+                ..
+            } => {
+                scalar_args.push(convert_expr_to_scalar_internal(
+                    arg,
+                    bindings,
+                    custom_func_registry,
+                )?);
+            }
+            FunctionArg::Named {
+                arg: FunctionArgExpr::QualifiedWildcard(object_name),
+                ..
+            } => {
+                let qualifier = object_name
+                    .0
+                    .iter()
+                    .map(|ident| ident.value.clone())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                scalar_args.push(ScalarExpr::wildcard_for(qualifier));
+            }
+            FunctionArg::Named {
+                arg: FunctionArgExpr::Wildcard,
+                ..
+            } => {
+                scalar_args.push(ScalarExpr::wildcard_all());
+            }
+        }
+    }
+
+    let custom_func = maybe_specialize_literal_regex_func(custom_func.name(), &scalar_args)
+        .map_err(|err| ConversionError::TypeConversionError(err.to_string()))?
+        .unwrap_or(custom_func);
+
+    Ok(ScalarExpr::CallFunc {
+        func: custom_func,
+        args: scalar_args,
+    })
+}
+
+/// Convert BETWEEN expression
+fn convert_between_expression(
+    expr: &Expr,
+    low: &Expr,
+    high: &Expr,
+    negated: bool,
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    let value_expr = convert_expr_to_scalar_internal(expr, bindings, custom_func_registry)?;
+    let low_expr = convert_expr_to_scalar_internal(low, bindings, custom_func_registry)?;
+    let high_expr = convert_expr_to_scalar_internal(high, bindings, custom_func_registry)?;
+
+    let lower_bound = ScalarExpr::CallBinary {
+        func: BinaryFunc::Gte,
+        expr1: Box::new(value_expr.clone()),
+        expr2: Box::new(low_expr),
+    };
+
+    let upper_bound = ScalarExpr::CallBinary {
+        func: BinaryFunc::Lte,
+        expr1: Box::new(value_expr),
+        expr2: Box::new(high_expr),
+    };
+
+    let between_expr = ScalarExpr::CallBinary {
+        func: BinaryFunc::Mul, // Using Mul as AND logic
+        expr1: Box::new(lower_bound),
+        expr2: Box::new(upper_bound),
+    };
+
+    if negated {
+        Ok(ScalarExpr::CallUnary {
+            func: UnaryFunc::Not,
+            expr: Box::new(between_expr),
+        })
+    } else {
+        Ok(between_expr)
+    }
+}
+
+/// Convert IN LIST expression
+fn convert_in_list_expression(
+    expr: &Expr,
+    list: &[Expr],
+    negated: bool,
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    if list.is_empty() {
+        return Ok(ScalarExpr::Literal(
+            Value::Bool(false),
+            ConcreteDatatype::Bool(BooleanType),
+        ));
+    }
+
+    let value_expr = convert_expr_to_scalar_internal(expr, bindings, custom_func_registry)?;
+    let mut result_expr = None;
+
+    for list_item in list {
+        let item_expr = convert_expr_to_scalar_internal(list_item, bindings, custom_func_registry)?;
+        let comparison = ScalarExpr::CallBinary {
+            func: BinaryFunc::Eq,
+            expr1: Box::new(value_expr.clone()),
+            expr2: Box::new(item_expr),
+        };
+
+        result_expr = match result_expr {
+            Some(prev) => Some(ScalarExpr::CallBinary {
+                func: BinaryFunc::Add, // Using Add as OR logic
+                expr1: Box::new(prev),
+                expr2: Box::new(comparison),
+            }),
+            None => Some(comparison),
+        };
+    }
+
+    let Some(final_expr) = result_expr else {
+        // structurally dead: list is guaranteed non-empty by the early return above
+        return Ok(ScalarExpr::Literal(
+            Value::Bool(false),
+            ConcreteDatatype::Bool(BooleanType),
+        ));
+    };
+
+    if negated {
+        Ok(ScalarExpr::CallUnary {
+            func: UnaryFunc::Not,
+            expr: Box::new(final_expr),
+        })
+    } else {
+        Ok(final_expr)
+    }
+}
+
+/// Convert CASE expression
+fn convert_case_expression(
+    operand: &Option<Box<Expr>>,
+    conditions: &[Expr],
+    results: &[Expr],
+    else_result: &Option<Box<Expr>>,
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    if conditions.len() != results.len() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "CASE requires conditions/results length match, got {} and {}",
+            conditions.len(),
+            results.len()
+        )));
+    }
+
+    let operand_scalar = match operand.as_ref() {
+        Some(expr) => Some(Box::new(convert_expr_to_scalar_internal(
+            expr,
+            bindings,
+            custom_func_registry,
+        )?)),
+        None => None,
+    };
+
+    let mut when_then = Vec::with_capacity(conditions.len());
+    for (when_expr, then_expr) in conditions.iter().zip(results.iter()) {
+        when_then.push((
+            convert_expr_to_scalar_internal(when_expr, bindings, custom_func_registry)?,
+            convert_expr_to_scalar_internal(then_expr, bindings, custom_func_registry)?,
+        ));
+    }
+
+    let else_scalar = match else_result.as_ref() {
+        Some(expr) => Some(Box::new(convert_expr_to_scalar_internal(
+            expr,
+            bindings,
+            custom_func_registry,
+        )?)),
+        None => None,
+    };
+
+    Ok(ScalarExpr::Case {
+        operand: operand_scalar,
+        when_then,
+        else_expr: else_scalar,
+    })
+}
+
+/// Extract expressions from SQL SELECT statement
+pub fn extract_select_expressions(sql: &str) -> Result<Vec<ScalarExpr>, ConversionError> {
+    use sqlparser::dialect::GenericDialect;
+    use sqlparser::parser::Parser;
+
+    let dialect = GenericDialect {};
+    let statements = Parser::parse_sql(&dialect, sql)
+        .map_err(|e| ConversionError::UnsupportedExpression(format!("Parse error: {}", e)))?;
+
+    if statements.len() != 1 {
+        return Err(ConversionError::UnsupportedExpression(
+            "Expected exactly one SQL statement".to_string(),
+        ));
+    }
+
+    let statement = &statements[0];
+
+    match statement {
+        sqlparser::ast::Statement::Query(query) => match &*query.body {
+            sqlparser::ast::SetExpr::Select(select) => {
+                let mut expressions = Vec::new();
+
+                for item in &select.projection {
+                    match item {
+                        sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
+                            expressions.push(convert_expr_to_scalar(expr)?);
+                        }
+                        sqlparser::ast::SelectItem::ExprWithAlias { expr, .. } => {
+                            expressions.push(convert_expr_to_scalar(expr)?);
+                        }
+                        _ => {
+                            return Err(ConversionError::UnsupportedExpression(
+                                "Unsupported SELECT item type".to_string(),
+                            ))
+                        }
+                    }
+                }
+
+                Ok(expressions)
+            }
+            _ => Err(ConversionError::UnsupportedExpression(
+                "Expected SELECT statement".to_string(),
+            )),
+        },
+        _ => Err(ConversionError::UnsupportedExpression(
+            "Expected SELECT statement".to_string(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convert_identifier_wildcard_becomes_scalar_wildcard() {
+        let expr = Expr::Identifier(Ident::new("*"));
+        let scalar = convert_expr_to_scalar(&expr).expect("conversion");
+        assert!(matches!(scalar, ScalarExpr::Wildcard { source_name: None }));
+    }
+
+    #[test]
+    fn convert_compound_wildcard_tracks_prefix() {
+        let expr = Expr::CompoundIdentifier(vec![Ident::new("orders"), Ident::new("*")]);
+        let scalar = convert_expr_to_scalar(&expr).expect("conversion");
+        match scalar {
+            ScalarExpr::Wildcard {
+                source_name: Some(prefix),
+            } => assert_eq!(prefix, "orders"),
+            other => panic!("unexpected scalar expr: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_select_expressions_accepts_custom_function_aliases() {
+        let exprs =
+            extract_select_expressions("SELECT regexp_substr('abc123', '\\\\d+')").expect("sql");
+        assert_eq!(exprs.len(), 1);
+
+        match &exprs[0] {
+            ScalarExpr::CallFunc { func, .. } => {
+                assert_eq!(func.name(), "regexp_substring");
+                assert_eq!(format!("{:?}", func), "CompiledRegexpSubstrFunc");
+            }
+            other => panic!("unexpected scalar expr: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_select_expressions_rejects_invalid_literal_regex_patterns() {
+        let err = extract_select_expressions("SELECT regexp_matches('abc', '(')")
+            .expect_err("invalid literal regex should fail during conversion");
+
+        match err {
+            ConversionError::TypeConversionError(msg) => {
+                assert!(msg.contains("valid regex"), "unexpected error: {msg}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}
+
+/// Convert SelectStmt to ScalarExpr with aliases
+pub fn convert_select_stmt_to_scalar(
+    select_stmt: &parser::SelectStmt,
+) -> Result<Vec<(ScalarExpr, Option<String>)>, ConversionError> {
+    let mut results = Vec::new();
+
+    for field in &select_stmt.select_fields {
+        let scalar_expr = convert_expr_to_scalar(&field.expr)?;
+        results.push((scalar_expr, field.alias.clone()));
+    }
+
+    Ok(results)
+}
+
+/// High-level API: StreamDialect SQL to ScalarExpr conversion
+pub struct StreamSqlConverter {}
+
+impl StreamSqlConverter {
+    pub fn new() -> Self {
+        Self {}
+    }
+    pub fn convert_select_stmt(
+        &self,
+        select_stmt: &parser::SelectStmt,
+    ) -> Result<Vec<(ScalarExpr, Option<String>)>, ConversionError> {
+        // 核心转换：SelectStmt → ScalarExpr
+        convert_select_stmt_to_scalar(select_stmt)
+    }
+
+    pub fn convert_select_stmt_to_scalar(
+        &self,
+        select_stmt: &parser::SelectStmt,
+    ) -> Result<Vec<ScalarExpr>, ConversionError> {
+        let results = self.convert_select_stmt(select_stmt)?;
+        Ok(results.into_iter().map(|(expr, _)| expr).collect())
+    }
+}
+
+impl Default for StreamSqlConverter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
